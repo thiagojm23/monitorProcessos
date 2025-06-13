@@ -11,6 +11,7 @@ LOCK_DADOS = threading.Lock()
 CONTINUAR_EXECUCAO = True
 PID_MONITORAMENTO_DETALHADO = None
 DADOS_MONITORAMENTO_DETALHADO = {}
+PICOS_MEMORIA_MB = {}  # Nova variável global para picos de memória
 
 # Mapeamento de prioridades para nomes amigáveis (Windows)
 # As constantes reais de psutil são usadas ao definir.
@@ -24,11 +25,15 @@ PRIORIDADES_WINDOWS_MAP = {
 }
 # Para Linux/macOS, psutil.Process.nice() usa valores inteiros.
 # Esta implementação foca mais no modelo Windows para as classes de prioridade nomeadas.
+num = 0
 
 
 def limpar_tela():
+    global num
+    num += 1
     """Limpa o terminal."""
-    os.system("cls" if os.name == "nt" else "clear")
+    os.system("cls")
+    print("Num atualizacoes: ", num)
 
 
 def obter_nome_prioridade_windows(pid):
@@ -39,70 +44,186 @@ def obter_nome_prioridade_windows(pid):
             return PRIORIDADES_WINDOWS_MAP.get(p.nice(), "Desconhecida")
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             return "N/A"
-    else:  # Linux/macOS
-        try:
-            p = psutil.Process(pid)
-            return f"Nice: {p.nice()}"
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            return "N/A"
 
 
 # --- Thread de Coleta de Dados ---
 def thread_coleta_dados():
     """Thread que coleta informações dos processos periodicamente."""
-    global DADOS_PROCESSOS_COMPARTILHADOS, CONTINUAR_EXECUCAO, PID_MONITORAMENTO_DETALHADO, DADOS_MONITORAMENTO_DETALHADO
+    global DADOS_PROCESSOS_COMPARTILHADOS, CONTINUAR_EXECUCAO, PID_MONITORAMENTO_DETALHADO, DADOS_MONITORAMENTO_DETALHADO, PICOS_MEMORIA_MB
+    script_pid = os.getpid()  # Get current script's PID
 
     while CONTINUAR_EXECUCAO:
         lista_temp_processos = []
-        # Considerar apenas os top N processos por uso de memória para simplificar a exibição
-        processos_ordenados = sorted(
-            psutil.process_iter(
-                ["pid", "name", "memory_info", "cpu_percent", "num_threads"]
-            ),
-            key=lambda p: p.info["memory_info"].rss if p.info["memory_info"] else 0,
-            reverse=True,
-        )
 
-        for p in processos_ordenados[:20]:  # Pega os top 20
+        # 1. Collect all other processes
+        outros_processos_candidatos_info = []
+        for p_obj in psutil.process_iter(
+            ["pid", "name", "memory_info", "cpu_percent", "num_threads", "cmdline"]
+        ):
             try:
-                info = p.info
-                mem_rss = (
+                info = p_obj.info  # Access the .info attribute
+                if info["pid"] == script_pid:
+                    continue  # Skip self for this part of the collection
+                outros_processos_candidatos_info.append(info)
+            except (
+                psutil.NoSuchProcess,
+                psutil.AccessDenied,
+                TypeError,
+                AttributeError,
+            ):
+                # Process might have died, access denied, or info was incomplete during iteration
+                continue
+
+        # 2. Sort other processes by memory and take top 20
+        processos_para_exibir_info = sorted(
+            outros_processos_candidatos_info,
+            key=lambda p_info: (
+                p_info["memory_info"].rss if p_info.get("memory_info") else 0
+            ),
+            reverse=True,
+        )[:20]
+
+        # 3. Process these top 20 other processes
+        for info in processos_para_exibir_info:
+            try:
+                pid = info["pid"]
+                mem_rss_mb = (
                     info["memory_info"].rss / (1024 * 1024)
-                    if info["memory_info"]
+                    if info.get("memory_info")
                     else 0
-                )  # MB
-                cpu_percent = (
-                    info["cpu_percent"] if info["cpu_percent"] is not None else 0.0
-                )  # Requer chamar uma vez antes para ter valor
-                num_threads = (
-                    info["num_threads"] if info["num_threads"] is not None else "N/A"
                 )
+
+                PICOS_MEMORIA_MB[pid] = max(PICOS_MEMORIA_MB.get(pid, 0), mem_rss_mb)
+                pico_mem_rss_mb_atual = PICOS_MEMORIA_MB[pid]
+
+                cpu_percent_val = (
+                    info["cpu_percent"] if info.get("cpu_percent") is not None else 0.0
+                )
+                num_threads_val = (
+                    info["num_threads"]
+                    if info.get("num_threads") is not None
+                    else "N/A"
+                )
+
+                detalhes_processo = "N/A"
+                process_name = info.get("name", "")
+                if process_name and process_name.lower() == "chrome.exe":
+                    cmdline = info.get("cmdline")
+                    if cmdline:
+                        is_renderer = any("--type=renderer" in arg for arg in cmdline)
+                        is_gpu = any("--type=gpu-process" in arg for arg in cmdline)
+                        is_utility = any("--type=utility" in arg for arg in cmdline)
+                        is_extension = any(
+                            "--extension-process" in arg for arg in cmdline
+                        )
+
+                        if is_renderer:
+                            detalhes_processo = "Chrome Tab/Ext"
+                            for arg in cmdline:
+                                if arg.startswith("http:") or arg.startswith("https"):
+                                    url_part = arg.split("?")[0]
+                                    if len(url_part) > 18:
+                                        url_part = url_part[:15] + "..."
+                                    detalhes_processo += f": {url_part}"
+                                    break
+                                elif "--app-id=" in arg:
+                                    app_id = arg.split("=")[1]
+                                    detalhes_processo += f": App({app_id[:10]})"
+                                    break
+                        elif is_gpu:
+                            detalhes_processo = "Chrome GPU"
+                        elif is_extension:
+                            detalhes_processo = "Chrome Extension"
+                        elif is_utility:
+                            detalhes_processo = "Chrome Utility"
+                            if any(
+                                "--service-sandbox-type=network" in arg
+                                for arg in cmdline
+                            ):
+                                detalhes_processo = "Chrome Network Service"
+                            elif any("crashpad-handler" in arg for arg in cmdline):
+                                detalhes_processo = "Chrome Crashpad"
+                        elif not any(
+                            arg.startswith("--type=") for arg in cmdline
+                        ) and not any(
+                            arg.startswith("--extension-process") for arg in cmdline
+                        ):
+                            try:
+                                parent_proc = psutil.Process(pid)
+                                children = parent_proc.children(recursive=False)
+                                if any(
+                                    child.name().lower() == "chrome.exe"
+                                    for child in children
+                                ):
+                                    detalhes_processo = "Chrome Principal"
+                                else:
+                                    detalhes_processo = "Chrome (Outro)"
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                detalhes_processo = "Chrome (Principal?)"
+                        else:
+                            detalhes_processo = "Chrome (Outro)"
+                    else:
+                        detalhes_processo = "Chrome (sem cmdline)"
 
                 lista_temp_processos.append(
                     {
-                        "pid": info["pid"],
-                        "nome": info["name"],
-                        "mem_rss_mb": mem_rss,
-                        "cpu_percent": cpu_percent,
-                        "prioridade_nome": obter_nome_prioridade_windows(info["pid"]),
-                        "num_threads": num_threads,
+                        "pid": pid,
+                        "nome": process_name,
+                        "mem_rss_mb": mem_rss_mb,
+                        "pico_mem_rss_mb": pico_mem_rss_mb_atual,
+                        "cpu_percent": cpu_percent_val,
+                        "prioridade_nome": obter_nome_prioridade_windows(pid),
+                        "num_threads": num_threads_val,
+                        "detalhes_processo": detalhes_processo,
                     }
                 )
-            except (psutil.NoSuchProcess, psutil.AccessDenied, TypeError):
-                # Processo pode ter terminado ou acesso negado
+            except (TypeError, AttributeError, KeyError) as e:
+                # print(f"Skipping process due to error: {e} - Info: {info}") # Optional debug
                 continue
 
+        # 4. Process the current script
+        try:
+            p_script = psutil.Process(script_pid)
+            script_cpu_val = p_script.cpu_percent(interval=None)
+            script_mem_info = p_script.memory_info()
+            mem_rss_mb_script = (
+                script_mem_info.rss / (1024 * 1024) if script_mem_info else 0
+            )
+
+            PICOS_MEMORIA_MB[script_pid] = max(
+                PICOS_MEMORIA_MB.get(script_pid, 0), mem_rss_mb_script
+            )
+            pico_mem_script_atual = PICOS_MEMORIA_MB[script_pid]
+
+            lista_temp_processos.append(
+                {
+                    "pid": script_pid,
+                    "nome": p_script.name(),
+                    "mem_rss_mb": mem_rss_mb_script,
+                    "pico_mem_rss_mb": pico_mem_script_atual,
+                    "cpu_percent": (
+                        script_cpu_val if script_cpu_val is not None else 0.0
+                    ),
+                    "prioridade_nome": obter_nome_prioridade_windows(script_pid),
+                    "num_threads": p_script.num_threads(),
+                    "detalhes_processo": "Este Script Python :)",
+                }
+            )
+        except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
+            # Script process itself couldn't be accessed (should be rare)
+            pass
+
+        # 5. Update shared data
         with LOCK_DADOS:
             DADOS_PROCESSOS_COMPARTILHADOS = lista_temp_processos
-
-            # Se houver um PID para monitoramento detalhado
+            # Se houver um PID para monitoramento detalhado (logic remains the same)
             if PID_MONITORAMENTO_DETALHADO:
                 try:
                     proc_detalhe = psutil.Process(PID_MONITORAMENTO_DETALHADO)
-                    proc_detalhe.cpu_percent(
-                        interval=None
-                    )  # Chamar para preparar a próxima leitura
-                    time.sleep(0.1)  # Pequeno intervalo para cpu_percent funcionar
+                    # It's good practice to call cpu_percent on the specific object
+                    # if you want its CPU usage relative to its last call.
+                    proc_detalhe.cpu_percent(interval=None)
+                    time.sleep(0.1)  # Interval for cpu_percent
                     DADOS_MONITORAMENTO_DETALHADO = {
                         "pid": proc_detalhe.pid,
                         "nome": proc_detalhe.name(),
@@ -123,35 +244,14 @@ def thread_coleta_dados():
                     DADOS_MONITORAMENTO_DETALHADO = {
                         "erro": "Processo não encontrado ou acesso negado."
                     }
-                    # PID_MONITORAMENTO_DETALHADO = None # Opcional: parar monitoramento se der erro
-
-        time.sleep(2)  # Intervalo de atualização da lista principal
+        time.sleep(2)
 
 
+# ...existing code...
 # --- Funções de Interação com Processos ---
 def alterar_prioridade_processo(pid):
     limpar_tela()
     print(f"--- Alterar Prioridade do PID: {pid} ---")
-    if os.name != "nt":
-        print("Alteração de prioridade via 'nice' (Linux/macOS):")
-        try:
-            p = psutil.Process(pid)
-            atual_nice = p.nice()
-            print(f"Valor 'nice' atual: {atual_nice}")
-            novo_nice_str = input(
-                f"Digite o novo valor 'nice' (ex: -10, 0, 10) ou 'c' para cancelar: "
-            )
-            if novo_nice_str.lower() == "c":
-                return
-            novo_nice = int(novo_nice_str)
-            p.nice(novo_nice)
-            print(f"Prioridade 'nice' do processo {pid} alterada para {novo_nice}.")
-        except ValueError:
-            print("Valor inválido.")
-        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-            print(f"Erro: {e}")
-        input("Pressione Enter para continuar...")
-        return
 
     # Lógica para Windows
     print("Prioridades Disponíveis (Windows):")
@@ -268,43 +368,87 @@ def listar_threads_do_processo(pid):
     input("Pressione Enter para continuar...")
 
 
-def obter_input_com_timeout(prompt="> ", timeout=10):
+def obter_input_com_timeout(prompt_text="> ", timeout=5, initial_buffer_str=""):
     """
-    Obtém input do usuário com timeout. Usa msvcrt no Windows e select em outros SOs.
-    Retorna uma string vazia em caso de timeout.
+    Obtém input do usuário com timeout, preserving and displaying an initial buffer,
+    and allowing left/right arrow key cursor movement.
+    Retorna (string_final, True_se_timeout_False_se_enter).
     """
-    print(prompt, end="", flush=True)
+    buffer = list(initial_buffer_str)
+    cursor_idx = len(buffer)  # Cursor position within the buffer content (0-based)
+
+    # Initial display: prompt + current buffer content
+    # The cursor will naturally be at the end of this initial print.
+    sys.stdout.write(prompt_text + "".join(buffer))
+    sys.stdout.flush()
+
     start_time = time.time()
-    buffer = []
+    # Keep track of the length of the line previously displayed to clear it properly
+    last_displayed_line_len = len(prompt_text) + len(buffer)
+
     while True:
         # Verifica se o timeout ocorreu
         if time.time() - start_time > timeout:
-            print("\n[Auto-refresh após 10s de inatividade]")
-            return ""
+            return "".join(buffer), True  # Timeout occurred
 
         # Verifica se uma tecla foi pressionada
         if msvcrt.kbhit():
-            char = msvcrt.getch()
-            # Tecla Enter
-            if char == b"\r":
-                print()  # Pula para a próxima linha no console
-                return "".join(buffer)
-            # Tecla Backspace
-            elif char == b"\x08":
-                if buffer:
-                    buffer.pop()
-                    # Apaga o último caractere da tela
-                    sys.stdout.write("\b \b")
-                    sys.stdout.flush()
-            # Caracteres normais
-            else:
+            char_code = msvcrt.getch()
+            needs_redisplay = False
+
+            if char_code == b"\xe0":  # Prefix for special keys (like arrow keys)
+                second_char_code = msvcrt.getch()
+                if second_char_code == b"K":  # Left arrow
+                    cursor_idx = max(0, cursor_idx - 1)
+                    needs_redisplay = True
+                elif second_char_code == b"M":  # Right arrow
+                    cursor_idx = min(len(buffer), cursor_idx + 1)
+                    needs_redisplay = True
+                # Other special keys (Home, End, Del) could be handled here
+            elif char_code == b"\r":  # Tecla Enter
+                sys.stdout.write("\n")  # Pula para a próxima linha no console
+                sys.stdout.flush()
+                return "".join(buffer), False  # Return final buffer and Enter flag
+            elif char_code == b"\x08":  # Tecla Backspace
+                if cursor_idx > 0:
+                    buffer.pop(cursor_idx - 1)
+                    cursor_idx -= 1
+                    needs_redisplay = True
+            else:  # Caracteres normais
                 try:
-                    decoded_char = char.decode("utf-8", errors="ignore")
-                    buffer.append(decoded_char)
-                    sys.stdout.write(decoded_char)
-                    sys.stdout.flush()
+                    decoded_char = char_code.decode("utf-8", errors="ignore")
+                    if decoded_char:  # Se a decodificação resultar em algo
+                        buffer.insert(cursor_idx, decoded_char)
+                        cursor_idx += 1
+                        needs_redisplay = True
                 except UnicodeDecodeError:
                     pass  # Ignora caracteres não decodificáveis
+
+            if needs_redisplay:
+                # 1. Move cursor to the beginning of the current console line
+                sys.stdout.write("\r")
+
+                # 2. Prepare the new line content
+                current_buffer_str = "".join(buffer)
+                full_new_line = prompt_text + current_buffer_str
+
+                # 3. Write the new line
+                sys.stdout.write(full_new_line)
+
+                # 4. Clear any trailing characters if the new line is shorter than the previous one
+                clear_len = last_displayed_line_len - len(full_new_line)
+                if clear_len > 0:
+                    sys.stdout.write(" " * clear_len)
+
+                # 5. Reposition the cursor:
+                #    Move back to the start of the line, then write content up to the cursor_idx.
+                sys.stdout.write("\r")
+                sys.stdout.write(prompt_text + "".join(buffer[:cursor_idx]))
+
+                sys.stdout.flush()
+                last_displayed_line_len = len(
+                    full_new_line
+                )  # Update for the next iteration
 
         time.sleep(0.05)  # Evita uso excessivo de CPU
 
@@ -312,42 +456,46 @@ def obter_input_com_timeout(prompt="> ", timeout=10):
 # --- Thread de Interface com Usuário ---
 def thread_interface_usuario():
     global CONTINUAR_EXECUCAO, PID_MONITORAMENTO_DETALHADO, DADOS_MONITORAMENTO_DETALHADO
+    current_user_input_str = ""
 
-    processo_selecionado_local = (
-        None  # Para manter o processo selecionado entre atualizações
-    )
+    processo_selecionado_local = None
 
     while CONTINUAR_EXECUCAO:
         limpar_tela()
         print("--- Monitor de Processos Python ---")
+        # Ajuste de largura: Detalhes de 30 para 20. Mem Pico adicionado com 14.
+        # Nome: 25, Detalhes: 20, Mem (MB): 10, Mem Pico (MB): 14
+        # Total: 3+7+25+20+10+14+8+17+7 = 111. Separador para 120.
         print(
-            f"{'#':<3} {'PID':<7} {'Nome':<30} {'Mem (MB)':<10} {'CPU (%)':<8} {'Prioridade':<17} {'Threads':<7}"
+            f"{'#':<3} {'PID':<7} {'Nome':<25} {'Detalhes':<20} {'Mem (MB)':<10} {'Mem Pico (MB)':<15} {'CPU (%)':<8} {'Prioridade':<17} {'Threads':<7}"
         )
-        print("-" * 90)
+        print("-" * 120)  # Ajustado o separador
 
         with LOCK_DADOS:
-            copia_dados_processos = list(
-                DADOS_PROCESSOS_COMPARTILHADOS
-            )  # Faz uma cópia superficial
+            copia_dados_processos = list(DADOS_PROCESSOS_COMPARTILHADOS)
 
         if not copia_dados_processos:
             print("Coletando dados...")
         else:
             for i, p_info in enumerate(copia_dados_processos):
+                # Ajuste de truncamento para Nome e Detalhes
+                nome_display = (p_info["nome"] or "")[:23]
+                detalhes_display = (p_info.get("detalhes_processo", "N/A") or "")[:18]
+
                 print(
-                    f"{i+1:<3} {p_info['pid']:<7} {p_info['nome'][:28]:<30} {p_info['mem_rss_mb']:<10.2f} ",
+                    f"{i+1:<3} {p_info['pid']:<7} {nome_display:<25} {detalhes_display:<20} {p_info['mem_rss_mb']:<10.2f} {p_info.get('pico_mem_rss_mb', 0.0):<15.2f} ",
                     end="",
                 )
                 print(
                     f"{p_info['cpu_percent']:<8.1f} {str(p_info['prioridade_nome']):<17} {str(p_info['num_threads']):<7}"
                 )
 
-        print("-" * 90)
+        print("-" * 120)  # Ajustado o separador
 
         # Se estiver no modo de monitoramento detalhado
         if PID_MONITORAMENTO_DETALHADO:
             print(
-                f"\n--- Monitoramento Detalhado PID: {PID_MONITORAMENTO_DETALHADO} ---"
+                f"\\n--- Monitoramento Detalhado PID: {PID_MONITORAMENTO_DETALHADO} ---"
             )
             with LOCK_DADOS:
                 detalhes = DADOS_MONITORAMENTO_DETALHADO.copy()
@@ -375,96 +523,127 @@ def thread_interface_usuario():
             print("Pressione 'p' para parar monitoramento detalhado.")
             print("-" * 90)
 
-        print("\nOpções:")
+        print("\\nOpções:")
         print("Digite o '#' do processo para interagir, 's' para sair.")
-        print(
-            "Digite o 'Enter' sem digitar nada para atualizar a listagem de processos."
-        )
+        # A mensagem "Digite o 'Enter' sem digitar nada para atualizar..." é removida pois o refresh é automático.
         if PID_MONITORAMENTO_DETALHADO:
             print("'p' para PARAR monitoramento detalhado.")
         else:
             print("'m <#>' para INICIAR monitoramento detalhado (ex: m 1).")
-
         try:
-            print("Aguardando comando (timeout em 10s)...")
+            escolha_usuario_str, timed_out = obter_input_com_timeout(
+                prompt_text=f"Comando (auto-refresh em 5s): ",
+                timeout=5,
+                initial_buffer_str=current_user_input_str,
+            )
 
-            escolha_usuario = obter_input_com_timeout().lower()
-
-            if not escolha_usuario:  # Input vazio, apenas atualiza a tela
-                time.sleep(0.5)  # Pequena pausa antes de redesenhar
-                continue
-
-            if escolha_usuario == "s":
-                CONTINUAR_EXECUCAO = False
-                break
-            elif escolha_usuario.startswith("m ") and not PID_MONITORAMENTO_DETALHADO:
-                try:
-                    idx_proc_monitorar = int(escolha_usuario.split(" ")[1]) - 1
-                    if 0 <= idx_proc_monitorar < len(copia_dados_processos):
-                        PID_MONITORAMENTO_DETALHADO = copia_dados_processos[
-                            idx_proc_monitorar
-                        ]["pid"]
-                        DADOS_MONITORAMENTO_DETALHADO = {}  # Limpa dados antigos
-                    else:
-                        print("Índice inválido para monitoramento.")
-                        time.sleep(1)
-                except (IndexError, ValueError):
-                    print("Formato inválido para monitoramento (ex: m 1).")
-                    time.sleep(1)
-            elif escolha_usuario == "p" and PID_MONITORAMENTO_DETALHADO:
-                PID_MONITORAMENTO_DETALHADO = None
-                DADOS_MONITORAMENTO_DETALHADO = {}
-
-            elif escolha_usuario.isdigit():
-                idx_selecionado = int(escolha_usuario) - 1
-                if 0 <= idx_selecionado < len(copia_dados_processos):
-                    processo_selecionado_local = copia_dados_processos[idx_selecionado]
-                    pid_alvo = processo_selecionado_local["pid"]
-                    # Menu de Ações para o Processo Selecionado
-                    while True:
-                        limpar_tela()
-                        print(
-                            f"--- Ações para PID: {pid_alvo} ({processo_selecionado_local['nome']}) ---"
-                        )
-                        print("1. Alterar Prioridade")
-                        print("2. Definir Afinidade de CPU")
-                        print("3. Listar Threads do Processo")
-                        print("4. Encerrar Processo")
-                        print(
-                            "5. Iniciar/Atualizar Monitoramento Detalhado deste Processo"
-                        )
-                        print("0. Voltar à lista principal")
-                        acao = input("Escolha uma ação: ")
-
-                        if acao == "1":
-                            alterar_prioridade_processo(pid_alvo)
-                        elif acao == "2":
-                            definir_afinidade_processador(pid_alvo)
-                        elif acao == "3":
-                            listar_threads_do_processo(pid_alvo)
-                        elif acao == "4":
-                            encerrar_processo_selecionado(pid_alvo)
-                            # Se encerrou, sair do menu de ações
-                            if not psutil.pid_exists(pid_alvo):
-                                break
-                        elif acao == "5":
-                            PID_MONITORAMENTO_DETALHADO = pid_alvo
-                            DADOS_MONITORAMENTO_DETALHADO = {}
-                            print(
-                                f"Monitoramento detalhado iniciado para PID {pid_alvo}. Retornando à tela principal."
-                            )
-                            time.sleep(1.5)
-                            break  # Volta para a tela principal para ver o monitoramento
-                        elif acao == "0":
-                            break
-                        else:
-                            print("Opção inválida.")
-                else:
-                    print("Número do processo inválido.")
-                    time.sleep(1)
+            if timed_out:
+                current_user_input_str = escolha_usuario_str  # Preserve buffer
+                continue  # Refresh screen
             else:
-                print("Comando não reconhecido.")
-                time.sleep(1)
+                # Enter was pressed
+                comando_processar = escolha_usuario_str.lower()
+                current_user_input_str = ""  # Reset buffer for next command
+
+                if (
+                    not comando_processar.strip()
+                ):  # User pressed Enter on an empty or whitespace line
+                    time.sleep(0.05)  # Pequena pausa antes de redesenhar
+                    continue
+
+                if comando_processar == "s":
+                    CONTINUAR_EXECUCAO = False
+                    break
+                elif (
+                    comando_processar.startswith("m ")
+                    and not PID_MONITORAMENTO_DETALHADO
+                ):
+                    try:
+                        idx_proc_monitorar = int(comando_processar.split(" ")[1]) - 1
+                        if 0 <= idx_proc_monitorar < len(copia_dados_processos):
+                            PID_MONITORAMENTO_DETALHADO = copia_dados_processos[
+                                idx_proc_monitorar
+                            ]["pid"]
+                            DADOS_MONITORAMENTO_DETALHADO = {}  # Limpa dados antigos
+                        else:
+                            print("Índice inválido para monitoramento.")
+                            time.sleep(1)
+                    except (IndexError, ValueError):
+                        print("Formato inválido para monitoramento (ex: m 1).")
+                        time.sleep(1)
+                elif comando_processar == "p" and PID_MONITORAMENTO_DETALHADO:
+                    PID_MONITORAMENTO_DETALHADO = None
+                    DADOS_MONITORAMENTO_DETALHADO = {}
+
+                elif comando_processar.isdigit():
+                    idx_selecionado = int(comando_processar) - 1
+                    if 0 <= idx_selecionado < len(copia_dados_processos):
+                        processo_selecionado_local = copia_dados_processos[
+                            idx_selecionado
+                        ]
+                        pid_alvo = processo_selecionado_local["pid"]
+                        # Menu de Ações para o Processo Selecionado
+                        while True:
+                            limpar_tela()
+                            print(
+                                f"--- Ações para PID: {pid_alvo} ({processo_selecionado_local['nome']}) ---"
+                            )
+                            print("1. Alterar Prioridade")
+                            print("2. Definir Afinidade de CPU")
+                            print("3. Listar Threads do Processo")
+                            print("4. Encerrar Processo")
+                            print(
+                                "5. Iniciar/Atualizar Monitoramento Detalhado deste Processo"
+                            )
+                            print("0. Voltar à lista principal")
+
+                            # Input para o menu de ações não precisa de preservação complexa,
+                            # pois é uma interação mais direta e curta.
+                            # Usamos input() padrão aqui.
+                            acao_prompt = f"Escolha uma ação para PID {pid_alvo}: "
+                            current_action_input = ""  # Reset for this specific prompt
+
+                            # For this sub-menu, we can use a simpler input or a modified one if needed.
+                            # For now, using standard input() for simplicity as it's a nested menu.
+                            # If input preservation is also needed here, this part would need similar logic.
+                            # However, the main request was for the primary command input.
+                            acao = input(acao_prompt)
+
+                            if acao == "1":
+                                alterar_prioridade_processo(pid_alvo)
+                            elif acao == "2":
+                                definir_afinidade_processador(pid_alvo)
+                            elif acao == "3":
+                                listar_threads_do_processo(pid_alvo)
+                            elif acao == "4":
+                                encerrar_processo_selecionado(pid_alvo)
+                                if not psutil.pid_exists(pid_alvo):
+                                    # Se o processo foi encerrado, limpar o input do menu de ação
+                                    # e sair do menu de ações para voltar à lista principal.
+                                    current_user_input_str = (
+                                        ""  # Limpa o input principal também
+                                    )
+                                    break
+                            elif acao == "5":
+                                PID_MONITORAMENTO_DETALHADO = pid_alvo
+                                DADOS_MONITORAMENTO_DETALHADO = {}
+                                print(
+                                    f"Monitoramento detalhado iniciado para PID {pid_alvo}. Retornando à tela principal."
+                                )
+                                current_user_input_str = ""  # Limpa o input principal
+                                time.sleep(1.5)
+                                break
+                            elif acao == "0":
+                                break
+                            else:
+                                print("Opção inválida.")
+                                time.sleep(1)
+                    else:
+                        print("Número do processo inválido.")
+                        time.sleep(1)
+                else:
+                    print("Comando não reconhecido.")
+                    time.sleep(1)
 
         except Exception as e:
             print(f"Ocorreu um erro na interface: {e}")
@@ -480,7 +659,8 @@ if __name__ == "__main__":
     print("Iniciando o monitor de processos...")
     print("Lembre-se: para algumas ações (alterar prioridade, afinidade, encerrar),")
     print("o script pode precisar ser executado com privilégios de administrador.")
-    time.sleep(2)
+    print("Pressione Enter para continuar")
+    input()
 
     # Inicializa a primeira chamada de cpu_percent para todos os processos
     # para que os próximos resultados sejam mais precisos.
