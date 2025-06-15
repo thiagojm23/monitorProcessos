@@ -93,13 +93,3 @@ Ao iniciar, o script exibirá uma tabela com os processos. Abaixo da tabela, voc
     *   `LOCK_DADOS`: Um `threading.Lock()` para sincronizar o acesso a `DADOS_PROCESSOS_COMPARTILHADOS` e `DADOS_MONITORAMENTO_DETALHADO`.
     *   `CONTINUAR_EXECUCAO`: Flag booleana para controlar o loop principal das threads.
     *   `PID_MONITORAMENTO_DETALHADO` e `DADOS_MONITORAMENTO_DETALHADO`: Para o modo de monitoramento detalhado.
-
-## Possíveis Melhorias Futuras (Foco Windows)
-
-*   Visualizações gráficas mais ricas (talvez usando bibliotecas como `tkinter`, `PyQt` ou `curses` se adaptado para Windows).
-*   Configuração de quais colunas exibir.
-*   Ordenação da tabela por diferentes colunas (CPU, Nome, etc.).
-*   Filtragem de processos por nome.
-*   Log de eventos ou consumo de recursos.
-*   Mais detalhes extraídos da linha de comando para outros tipos de processos do Windows.
-*   Integração com APIs específicas do Windows para informações mais detalhadas, se necessário.
