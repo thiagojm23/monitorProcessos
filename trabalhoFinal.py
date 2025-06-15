@@ -12,6 +12,7 @@ CONTINUAR_EXECUCAO = True
 PID_MONITORAMENTO_DETALHADO = None
 DADOS_MONITORAMENTO_DETALHADO = {}
 PICOS_MEMORIA_MB = {}  # Nova variável global para picos de memória
+NUM_ATUALIZACOES = 0
 
 # Mapeamento de prioridades para nomes amigáveis (Windows)
 # As constantes reais de psutil são usadas ao definir.
@@ -23,17 +24,15 @@ PRIORIDADES_WINDOWS_MAP = {
     psutil.BELOW_NORMAL_PRIORITY_CLASS: "Abaixo do Normal",
     psutil.IDLE_PRIORITY_CLASS: "Ociosa",
 }
-# Para Linux/macOS, psutil.Process.nice() usa valores inteiros.
 # Esta implementação foca mais no modelo Windows para as classes de prioridade nomeadas.
-num = 0
 
 
 def limpar_tela():
-    global num
-    num += 1
+    global NUM_ATUALIZACOES
+    NUM_ATUALIZACOES += 1
     """Limpa o terminal."""
     os.system("cls")
-    print("Num atualizacoes: ", num)
+    print("Num atualizacoes: ", NUM_ATUALIZACOES)
 
 
 def obter_nome_prioridade_windows(pid):
@@ -50,20 +49,20 @@ def obter_nome_prioridade_windows(pid):
 def thread_coleta_dados():
     """Thread que coleta informações dos processos periodicamente."""
     global DADOS_PROCESSOS_COMPARTILHADOS, CONTINUAR_EXECUCAO, PID_MONITORAMENTO_DETALHADO, DADOS_MONITORAMENTO_DETALHADO, PICOS_MEMORIA_MB
-    script_pid = os.getpid()  # Get current script's PID
+    script_pid = os.getpid()  # Obtém o PID do script atual
 
     while CONTINUAR_EXECUCAO:
         lista_temp_processos = []
 
-        # 1. Collect all other processes
+        # 1. Coleta todos os outros processos
         outros_processos_candidatos_info = []
         for p_obj in psutil.process_iter(
             ["pid", "name", "memory_info", "cpu_percent", "num_threads", "cmdline"]
         ):
             try:
-                info = p_obj.info  # Access the .info attribute
+                info = p_obj.info  # Acessa o atributo .info
                 if info["pid"] == script_pid:
-                    continue  # Skip self for this part of the collection
+                    continue  # Pula o próprio script nesta parte da coleta
                 outros_processos_candidatos_info.append(info)
             except (
                 psutil.NoSuchProcess,
@@ -71,10 +70,10 @@ def thread_coleta_dados():
                 TypeError,
                 AttributeError,
             ):
-                # Process might have died, access denied, or info was incomplete during iteration
+                # O processo pode ter terminado, acesso negado ou informações incompletas durante a iteração
                 continue
 
-        # 2. Sort other processes by memory and take top 20
+        # 2. Ordena os outros processos por memória e pega os top 20
         processos_para_exibir_info = sorted(
             outros_processos_candidatos_info,
             key=lambda p_info: (
@@ -83,14 +82,14 @@ def thread_coleta_dados():
             reverse=True,
         )[:20]
 
-        # 3. Process these top 20 other processes
+        # 3. Processa esses top 20 outros processos
         for info in processos_para_exibir_info:
             try:
                 pid = info["pid"]
-                mem_rss_mb = (
-                    info["memory_info"].rss / (1024 * 1024)
-                    if info.get("memory_info")
-                    else 0
+                mem_info_obj = info.get("memory_info")
+                mem_rss_mb = mem_info_obj.rss / (1024 * 1024) if mem_info_obj else 0
+                mem_vms_mb = (  # Adicionado para memória virtual
+                    mem_info_obj.vms / (1024 * 1024) if mem_info_obj else 0
                 )
 
                 PICOS_MEMORIA_MB[pid] = max(PICOS_MEMORIA_MB.get(pid, 0), mem_rss_mb)
@@ -124,6 +123,7 @@ def thread_coleta_dados():
                                     url_part = arg.split("?")[0]
                                     if len(url_part) > 18:
                                         url_part = url_part[:15] + "..."
+
                                     detalhes_processo += f": {url_part}"
                                     break
                                 elif "--app-id=" in arg:
@@ -170,6 +170,7 @@ def thread_coleta_dados():
                         "pid": pid,
                         "nome": process_name,
                         "mem_rss_mb": mem_rss_mb,
+                        "mem_vms_mb": mem_vms_mb,
                         "pico_mem_rss_mb": pico_mem_rss_mb_atual,
                         "cpu_percent": cpu_percent_val,
                         "prioridade_nome": obter_nome_prioridade_windows(pid),
@@ -178,16 +179,19 @@ def thread_coleta_dados():
                     }
                 )
             except (TypeError, AttributeError, KeyError) as e:
-                # print(f"Skipping process due to error: {e} - Info: {info}") # Optional debug
+                # print(f"Pulando processo devido a erro: {e} - Info: {info}") # Debug opcional
                 continue
 
-        # 4. Process the current script
+        # 4. Processa o script atual
         try:
             p_script = psutil.Process(script_pid)
             script_cpu_val = p_script.cpu_percent(interval=None)
             script_mem_info = p_script.memory_info()
             mem_rss_mb_script = (
                 script_mem_info.rss / (1024 * 1024) if script_mem_info else 0
+            )
+            mem_vms_mb_script = (
+                script_mem_info.vms / (1024 * 1024) if script_mem_info else 0
             )
 
             PICOS_MEMORIA_MB[script_pid] = max(
@@ -200,6 +204,7 @@ def thread_coleta_dados():
                     "pid": script_pid,
                     "nome": p_script.name(),
                     "mem_rss_mb": mem_rss_mb_script,
+                    "mem_vms_mb": mem_vms_mb_script,
                     "pico_mem_rss_mb": pico_mem_script_atual,
                     "cpu_percent": (
                         script_cpu_val if script_cpu_val is not None else 0.0
@@ -210,25 +215,26 @@ def thread_coleta_dados():
                 }
             )
         except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
-            # Script process itself couldn't be accessed (should be rare)
+            # O processo do próprio script não pôde ser acessado (deve ser raro)
             pass
 
-        # 5. Update shared data
+        # 5. Atualiza os dados compartilhados
         with LOCK_DADOS:
             DADOS_PROCESSOS_COMPARTILHADOS = lista_temp_processos
-            # Se houver um PID para monitoramento detalhado (logic remains the same)
+            # Se houver um PID para monitoramento detalhado (lógica permanece a mesma)
             if PID_MONITORAMENTO_DETALHADO:
                 try:
                     proc_detalhe = psutil.Process(PID_MONITORAMENTO_DETALHADO)
-                    # It's good practice to call cpu_percent on the specific object
-                    # if you want its CPU usage relative to its last call.
+                    # É uma boa prática chamar cpu_percent no objeto específico
+                    # se você quiser seu uso de CPU relativo à última chamada.
                     proc_detalhe.cpu_percent(interval=None)
-                    time.sleep(0.1)  # Interval for cpu_percent
+                    time.sleep(0.1)  # Intervalo para cpu_percent
                     DADOS_MONITORAMENTO_DETALHADO = {
                         "pid": proc_detalhe.pid,
                         "nome": proc_detalhe.name(),
                         "cpu_percent": proc_detalhe.cpu_percent(interval=None),
                         "mem_rss_mb": proc_detalhe.memory_info().rss / (1024 * 1024),
+                        "mem_vms_mb": proc_detalhe.memory_info().vms / (1024 * 1024),
                         "num_threads": proc_detalhe.num_threads(),
                         "status": proc_detalhe.status(),
                         "threads_info": [
@@ -247,7 +253,6 @@ def thread_coleta_dados():
         time.sleep(2)
 
 
-# ...existing code...
 # --- Funções de Interação com Processos ---
 def alterar_prioridade_processo(pid):
     limpar_tela()
@@ -370,45 +375,47 @@ def listar_threads_do_processo(pid):
 
 def obter_input_com_timeout(prompt_text="> ", timeout=5, initial_buffer_str=""):
     """
-    Obtém input do usuário com timeout, preserving and displaying an initial buffer,
-    and allowing left/right arrow key cursor movement.
+    Obtém input do usuário com timeout, preservando e exibindo um buffer inicial,
+    e permitindo movimento do cursor com as teclas de seta esquerda/direita.
     Retorna (string_final, True_se_timeout_False_se_enter).
     """
     buffer = list(initial_buffer_str)
-    cursor_idx = len(buffer)  # Cursor position within the buffer content (0-based)
+    cursor_idx = len(buffer)  # Posição do cursor dentro do conteúdo do buffer (base 0)
 
-    # Initial display: prompt + current buffer content
-    # The cursor will naturally be at the end of this initial print.
+    # Exibição inicial: prompt + conteúdo atual do buffer
+    # O cursor estará naturalmente no final desta impressão inicial.
     sys.stdout.write(prompt_text + "".join(buffer))
     sys.stdout.flush()
 
     start_time = time.time()
-    # Keep track of the length of the line previously displayed to clear it properly
+    # Mantém o controle do comprimento da linha exibida anteriormente para limpá-la corretamente
     last_displayed_line_len = len(prompt_text) + len(buffer)
 
     while True:
         # Verifica se o timeout ocorreu
         if time.time() - start_time > timeout:
-            return "".join(buffer), True  # Timeout occurred
+            return "".join(buffer), True  # Timeout ocorreu
 
         # Verifica se uma tecla foi pressionada
         if msvcrt.kbhit():
             char_code = msvcrt.getch()
             needs_redisplay = False
 
-            if char_code == b"\xe0":  # Prefix for special keys (like arrow keys)
+            if (
+                char_code == b"\xe0"
+            ):  # Prefixo para teclas especiais (como teclas de seta)
                 second_char_code = msvcrt.getch()
-                if second_char_code == b"K":  # Left arrow
+                if second_char_code == b"K":  # Seta para esquerda
                     cursor_idx = max(0, cursor_idx - 1)
                     needs_redisplay = True
-                elif second_char_code == b"M":  # Right arrow
+                elif second_char_code == b"M":  # Seta para direita
                     cursor_idx = min(len(buffer), cursor_idx + 1)
                     needs_redisplay = True
-                # Other special keys (Home, End, Del) could be handled here
+                # Outras teclas especiais (Home, End, Del) poderiam ser tratadas aqui
             elif char_code == b"\r":  # Tecla Enter
                 sys.stdout.write("\n")  # Pula para a próxima linha no console
                 sys.stdout.flush()
-                return "".join(buffer), False  # Return final buffer and Enter flag
+                return "".join(buffer), False  # Retorna buffer final e flag de Enter
             elif char_code == b"\x08":  # Tecla Backspace
                 if cursor_idx > 0:
                     buffer.pop(cursor_idx - 1)
@@ -425,30 +432,30 @@ def obter_input_com_timeout(prompt_text="> ", timeout=5, initial_buffer_str=""):
                     pass  # Ignora caracteres não decodificáveis
 
             if needs_redisplay:
-                # 1. Move cursor to the beginning of the current console line
+                # 1. Move o cursor para o início da linha atual do console
                 sys.stdout.write("\r")
 
-                # 2. Prepare the new line content
+                # 2. Prepara o novo conteúdo da linha
                 current_buffer_str = "".join(buffer)
                 full_new_line = prompt_text + current_buffer_str
 
-                # 3. Write the new line
+                # 3. Escreve a nova linha
                 sys.stdout.write(full_new_line)
 
-                # 4. Clear any trailing characters if the new line is shorter than the previous one
+                # 4. Limpa quaisquer caracteres restantes se a nova linha for mais curta que a anterior
                 clear_len = last_displayed_line_len - len(full_new_line)
                 if clear_len > 0:
                     sys.stdout.write(" " * clear_len)
 
-                # 5. Reposition the cursor:
-                #    Move back to the start of the line, then write content up to the cursor_idx.
+                # 5. Reposiciona o cursor:
+                #    Move de volta para o início da linha, então escreve o conteúdo até o cursor_idx.
                 sys.stdout.write("\r")
                 sys.stdout.write(prompt_text + "".join(buffer[:cursor_idx]))
 
                 sys.stdout.flush()
                 last_displayed_line_len = len(
                     full_new_line
-                )  # Update for the next iteration
+                )  # Atualiza para a próxima iteração
 
         time.sleep(0.05)  # Evita uso excessivo de CPU
 
@@ -463,13 +470,13 @@ def thread_interface_usuario():
     while CONTINUAR_EXECUCAO:
         limpar_tela()
         print("--- Monitor de Processos Python ---")
-        # Ajuste de largura: Detalhes de 30 para 20. Mem Pico adicionado com 14.
-        # Nome: 25, Detalhes: 20, Mem (MB): 10, Mem Pico (MB): 14
-        # Total: 3+7+25+20+10+14+8+17+7 = 111. Separador para 120.
+        # Ajuste de largura: Detalhes de 30 para 20. Mem Pico adicionado com 14. Mem Virtual adicionada com 18
+        # Nome: 25, Detalhes: 20, Mem (MB): 10, Mem Pico (MB): 15, Mem Virtual (MB): 18
+        # Total: 3+7+25+20+10+15+18+8+17+7 = 130. Separador para 137 (considerando espaços).
         print(
-            f"{'#':<3} {'PID':<7} {'Nome':<25} {'Detalhes':<20} {'Mem (MB)':<10} {'Mem Pico (MB)':<15} {'CPU (%)':<8} {'Prioridade':<17} {'Threads':<7}"
+            f"{'#':<3} {'PID':<7} {'Nome':<25} {'Detalhes':<20} {'Mem (MB)':<10} {'Mem Pico (MB)':<15} {'Mem Virtual (MB)':<18} {'CPU (%)':<8} {'Prioridade':<17} {'Threads':<7}"
         )
-        print("-" * 120)  # Ajustado o separador
+        print("-" * 137)  # Ajustado o separador
 
         with LOCK_DADOS:
             copia_dados_processos = list(DADOS_PROCESSOS_COMPARTILHADOS)
@@ -483,14 +490,14 @@ def thread_interface_usuario():
                 detalhes_display = (p_info.get("detalhes_processo", "N/A") or "")[:18]
 
                 print(
-                    f"{i+1:<3} {p_info['pid']:<7} {nome_display:<25} {detalhes_display:<20} {p_info['mem_rss_mb']:<10.2f} {p_info.get('pico_mem_rss_mb', 0.0):<15.2f} ",
+                    f"{i+1:<3} {p_info['pid']:<7} {nome_display:<25} {detalhes_display:<20} {p_info['mem_rss_mb']:<10.2f} {p_info.get('pico_mem_rss_mb', 0.0):<15.2f} {p_info.get('mem_vms_mb', 0.0):<18.2f} ",
                     end="",
                 )
                 print(
                     f"{p_info['cpu_percent']:<8.1f} {str(p_info['prioridade_nome']):<17} {str(p_info['num_threads']):<7}"
                 )
 
-        print("-" * 120)  # Ajustado o separador
+        print("-" * 137)  # Ajustado o separador
 
         # Se estiver no modo de monitoramento detalhado
         if PID_MONITORAMENTO_DETALHADO:
