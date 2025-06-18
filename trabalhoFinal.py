@@ -11,10 +11,10 @@ LOCK_DADOS = threading.Lock()
 CONTINUAR_EXECUCAO = True
 PID_MONITORAMENTO_DETALHADO = None
 DADOS_MONITORAMENTO_DETALHADO = {}
-PICOS_MEMORIA_MB = {}  # Nova variável global para picos de memória
+PICOS_MEMORIA_MB = {}
 NUM_ATUALIZACOES = 0
 
-# Mapeamento de prioridades para nomes amigáveis (Windows)
+# Mapeamento de prioridades
 # As constantes reais de psutil são usadas ao definir.
 PRIORIDADES_WINDOWS_MAP = {
     psutil.REALTIME_PRIORITY_CLASS: "Tempo Real",
@@ -24,7 +24,6 @@ PRIORIDADES_WINDOWS_MAP = {
     psutil.BELOW_NORMAL_PRIORITY_CLASS: "Abaixo do Normal",
     psutil.IDLE_PRIORITY_CLASS: "Ociosa",
 }
-# Esta implementação foca mais no modelo Windows para as classes de prioridade nomeadas.
 
 
 def limpar_tela():
@@ -36,13 +35,11 @@ def limpar_tela():
 
 
 def obter_nome_prioridade_windows(pid):
-    """Retorna o nome amigável da prioridade para Windows."""
-    if os.name == "nt":
-        try:
-            p = psutil.Process(pid)
-            return PRIORIDADES_WINDOWS_MAP.get(p.nice(), "Desconhecida")
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            return "N/A"
+    try:
+        p = psutil.Process(pid)
+        return PRIORIDADES_WINDOWS_MAP.get(p.nice(), "Desconhecida")
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return "N/A"
 
 
 # --- Thread de Coleta de Dados ---
@@ -179,7 +176,6 @@ def thread_coleta_dados():
                     }
                 )
             except (TypeError, AttributeError, KeyError) as e:
-                # print(f"Pulando processo devido a erro: {e} - Info: {info}") # Debug opcional
                 continue
 
         # 4. Processa o script atual
@@ -225,14 +221,13 @@ def thread_coleta_dados():
             if PID_MONITORAMENTO_DETALHADO:
                 try:
                     proc_detalhe = psutil.Process(PID_MONITORAMENTO_DETALHADO)
-                    # É uma boa prática chamar cpu_percent no objeto específico
-                    # se você quiser seu uso de CPU relativo à última chamada.
-                    proc_detalhe.cpu_percent(interval=None)
-                    time.sleep(0.1)  # Intervalo para cpu_percent
+                    proc_detalhe.cpu_percent(interval=None)  # Inicializa a medição
+                    time.sleep(0.1)  # Pequeno intervalo para medir corretamente
+                    cpu_percent_val = proc_detalhe.cpu_percent(interval=None)
                     DADOS_MONITORAMENTO_DETALHADO = {
                         "pid": proc_detalhe.pid,
                         "nome": proc_detalhe.name(),
-                        "cpu_percent": proc_detalhe.cpu_percent(interval=None),
+                        "cpu_percent": cpu_percent_val,
                         "mem_rss_mb": proc_detalhe.memory_info().rss / (1024 * 1024),
                         "mem_vms_mb": proc_detalhe.memory_info().vms / (1024 * 1024),
                         "num_threads": proc_detalhe.num_threads(),
@@ -511,24 +506,12 @@ def thread_interface_usuario():
                 print(detalhes["erro"])
                 PID_MONITORAMENTO_DETALHADO = None  # Para de monitorar se deu erro
             elif detalhes:
+                cpu_val = detalhes.get("cpu_percent", 0.0)
                 print(
-                    f"Nome: {detalhes.get('nome', 'N/A')}, CPU: {detalhes.get('cpu_percent', 0.0):.1f}%, ",
-                    end="",
+                    f"Nome: {detalhes.get('nome', 'N/A')}, CPU: {cpu_val}%, Mem: {detalhes.get('mem_rss_mb', 0.0)}MB, Threads: {detalhes.get('num_threads', 'N/A')}, Status: {detalhes.get('status', 'N/A')}"
                 )
-                print(
-                    f"Mem: {detalhes.get('mem_rss_mb', 0.0):.2f}MB, Threads: {detalhes.get('num_threads', 'N/A')}, Status: {detalhes.get('status', 'N/A')}"
-                )
-                # Pseudo-gráfico simples de CPU
-                cpu_val = int(detalhes.get("cpu_percent", 0.0))
-                barra_cpu = (
-                    "["
-                    + "#" * (cpu_val // 5)
-                    + " " * (20 - (cpu_val // 5))
-                    + f"] {cpu_val}%"
-                )
-                print(f"CPU Usage: {barra_cpu}")
-            print("Pressione 'p' para parar monitoramento detalhado.")
-            print("-" * 90)
+        print("Pressione 'p' para parar monitoramento detalhado.")
+        print("-" * 90)
 
         print("\\nOpções:")
         print("Digite o '#' do processo para interagir, 's' para sair.")
@@ -654,11 +637,11 @@ def thread_interface_usuario():
 
         except Exception as e:
             print(f"Ocorreu um erro na interface: {e}")
-            time.sleep(2)  # Pausa para o usuário ver o erro
+            time.sleep(2)
         if PID_MONITORAMENTO_DETALHADO:
-            time.sleep(0.3)  # Atualiza mais rápido se monitorando
+            time.sleep(0.3)
         else:
-            time.sleep(0.5)  # Pequena pausa antes de redesenhar
+            time.sleep(0.5)
 
 
 # --- Ponto de Entrada Principal ---
