@@ -393,40 +393,38 @@ def obter_input_com_timeout(prompt_text="> ", timeout=5, initial_buffer_str=""):
 
         # Verifica se uma tecla foi pressionada
         if msvcrt.kbhit():
-            char_code = msvcrt.getch()
-            needs_redisplay = False
+            tecla = msvcrt.getch()
+            recarregarTela = False
 
-            if (
-                char_code == b"\xe0"
-            ):  # Prefixo para teclas especiais (como teclas de seta)
-                second_char_code = msvcrt.getch()
-                if second_char_code == b"K":  # Seta para esquerda
+            if tecla == b"\xe0":  # Prefixo para teclas especiais (como teclas de seta)
+                segunda_tecla = msvcrt.getch()
+                if segunda_tecla == b"K":  # Seta para esquerda
                     cursor_idx = max(0, cursor_idx - 1)
-                    needs_redisplay = True
-                elif second_char_code == b"M":  # Seta para direita
+                    recarregarTela = True
+                elif segunda_tecla == b"M":  # Seta para direita
                     cursor_idx = min(len(buffer), cursor_idx + 1)
-                    needs_redisplay = True
+                    recarregarTela = True
                 # Outras teclas especiais (Home, End, Del) poderiam ser tratadas aqui
-            elif char_code == b"\r":  # Tecla Enter
+            elif tecla == b"\r":  # Tecla Enter
                 sys.stdout.write("\n")  # Pula para a próxima linha no console
                 sys.stdout.flush()
                 return "".join(buffer), False  # Retorna buffer final e flag de Enter
-            elif char_code == b"\x08":  # Tecla Backspace
+            elif tecla == b"\x08":  # Tecla Backspace
                 if cursor_idx > 0:
                     buffer.pop(cursor_idx - 1)
                     cursor_idx -= 1
-                    needs_redisplay = True
+                    recarregarTela = True
             else:  # Caracteres normais
                 try:
-                    decoded_char = char_code.decode("utf-8", errors="ignore")
+                    decoded_char = tecla.decode("utf-8", errors="ignore")
                     if decoded_char:  # Se a decodificação resultar em algo
                         buffer.insert(cursor_idx, decoded_char)
                         cursor_idx += 1
-                        needs_redisplay = True
+                        recarregarTela = True
                 except UnicodeDecodeError:
                     pass  # Ignora caracteres não decodificáveis
 
-            if needs_redisplay:
+            if recarregarTela:
                 # 1. Move o cursor para o início da linha atual do console
                 sys.stdout.write("\r")
 
