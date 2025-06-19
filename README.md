@@ -1,5 +1,7 @@
 # Monitor de Processos Python Avançado para Windows
 
+## Executável está dentro da pasta dist (rodar como adm)
+
 ## Descrição
 
 Este é um script Python avançado para monitoramento e interação com processos do sistema operacional Windows em tempo real, diretamente do terminal. Ele foi projetado para fornecer uma visão detalhada dos processos em execução, similar ao Gerenciador de Tarefas do Windows, mas com funcionalidades adicionais e uma interface de usuário interativa no console.
